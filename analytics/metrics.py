@@ -6,6 +6,7 @@ and how many separate sprint efforts they produced.
 """
 
 import os
+import sys
 
 import numpy as np
 import pandas as pd
@@ -125,19 +126,41 @@ def report(df, distance_m, sprints):
     print("=" * 52)
 
 
-def main():
-    # Resolve the log relative to the project root (the parent of analytics/)
-    # so the script runs from any working directory.
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    csv_path = os.path.join(project_root, "simulation", "simulated_match.csv")
+def summarize(csv_path):
+    """Load a session log and print its summary. Returns (distance_m, sprints).
 
+    Only the GPS columns are read, so this works on both the simulated log and
+    a live run_pipeline.py log (which has no IMU columns). Live logs leave
+    lat/lon/speed blank until the GPS has a fix; those rows are dropped here.
+    Returns None if fewer than two fixed samples remain.
+    """
     df = pd.read_csv(csv_path, usecols=["timestamp", "latitude", "longitude", "speed_ms"])
-    print(f"Loaded {len(df)} samples from {csv_path}\n")
+    total = len(df)
+    df = df.dropna().reset_index(drop=True)
+    print(f"Loaded {total} samples from {csv_path} ({len(df)} with a GPS fix)\n")
+
+    if len(df) < 2:
+        print("Not enough GPS-fixed samples to compute distance or sprints.")
+        return None
 
     distance_m, _ = total_distance(df["latitude"].values, df["longitude"].values)
     sprints = detect_sprints(df["timestamp"].values, df["speed_ms"].values)
 
     report(df, distance_m, sprints)
+    return distance_m, sprints
+
+
+def main():
+    # Optional CLI argument: path to a session log. Defaults to the simulated
+    # match, resolved relative to the project root (the parent of analytics/)
+    # so the script runs from any working directory.
+    if len(sys.argv) > 1:
+        csv_path = sys.argv[1]
+    else:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        csv_path = os.path.join(project_root, "simulation", "simulated_match.csv")
+
+    summarize(csv_path)
 
 
 if __name__ == "__main__":

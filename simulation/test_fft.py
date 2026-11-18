@@ -23,6 +23,12 @@ BAND_LO, BAND_HI = 0.5, 5.0
 
 SPRINT_START, SPRINT_END = 20.0, 35.0   # known high-intensity window (s)
 
+# IMU (I2C 0x6a/0x6b) is offline. While False, the accelerometer cadence
+# reference -- and with it the motion-artifact labelling -- is skipped, and
+# the strongest in-band peak is reported as the heart rate. Set back to True
+# once the IMU is restored.
+IMU_ENABLED = False
+
 # --- Light-surface palette (validated: all-pairs CVD dE 9.2, normal 24.0) ---
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"          # primary ink -- titles
@@ -102,9 +108,17 @@ def classify_peaks(peak_freqs, peak_mags, accel_cadence):
     """Label each spectral peak as cadence artifact, heart rate, or harmonic.
 
     The peak closest to the accelerometer's cadence is the motion artifact;
-    the strongest remaining peak is the cardiac fundamental.
+    the strongest remaining peak is the cardiac fundamental. With no IMU
+    reference (accel_cadence is None) nothing can be identified as artifact,
+    so the strongest peak is taken as the heart rate.
     """
     labels = ["Harmonic / residual"] * len(peak_freqs)
+    if len(peak_freqs) == 0:
+        return labels
+
+    if accel_cadence is None:
+        labels[int(np.argmax(peak_mags))] = "Heart rate (cardiac fundamental)"
+        return labels
 
     cadence_i = int(np.argmin(np.abs(peak_freqs - accel_cadence)))
     labels[cadence_i] = "Running cadence (motion artifact)"
@@ -119,8 +133,13 @@ def classify_peaks(peak_freqs, peak_mags, accel_cadence):
 
 def report(peak_freqs, peak_mags, labels, accel_cadence):
     """Print the detected peaks in Hz and the matching BPM / SPM."""
-    print(f"\nIMU cadence reference ({SPRINT_START:.0f}-{SPRINT_END:.0f}s sprint): "
-          f"{accel_cadence:.2f} Hz -> {accel_cadence * 60:.0f} SPM")
+    if accel_cadence is None:
+        print("\nIMU offline -- motion-artifact cancellation bypassed. The "
+              "strongest peak is reported as heart rate and may be running "
+              "cadence.")
+    else:
+        print(f"\nIMU cadence reference ({SPRINT_START:.0f}-{SPRINT_END:.0f}s sprint): "
+              f"{accel_cadence:.2f} Hz -> {accel_cadence * 60:.0f} SPM")
     print(f"\nPPG spectral peaks in {BAND_LO}-{BAND_HI} Hz "
           f"({len(peak_freqs)} found, strongest first):")
 
@@ -194,9 +213,10 @@ def plot_spectrum(ax, freqs, mags, peak_freqs, peak_mags, labels):
                     ha="left" if side > 0 else "right",
                     arrowprops=dict(arrowstyle="-", color=AXIS, linewidth=0.8))
 
-    style_axis(ax,
-               "PPG frequency spectrum — motion artifact outranks the pulse",
-               "Frequency (Hz)", "Magnitude (2/N · |FFT|)")
+    title = ("PPG frequency spectrum — motion artifact outranks the pulse"
+             if any("cadence" in label.lower() for label in labels)
+             else "PPG frequency spectrum — IMU offline, no artifact reference")
+    style_axis(ax, title, "Frequency (Hz)", "Magnitude (2/N · |FFT|)")
     ax.set_xlim(0, 10)
     ax.set_ylim(0, peak_mags.max() * 1.35 if len(peak_mags) else None)
 
@@ -229,17 +249,20 @@ def main():
     freqs, mags = compute_spectrum(df["ppg_raw"].values, n, fs)
     peak_freqs, peak_mags = find_band_peaks(freqs, mags)
 
-    accel_cadence = cadence_from_accelerometer(df, fs)
+    use_imu = IMU_ENABLED and "accel_z" in df.columns
+    accel_cadence = cadence_from_accelerometer(df, fs) if use_imu else None
     labels = classify_peaks(peak_freqs, peak_mags, accel_cadence)
     report(peak_freqs, peak_mags, labels, accel_cadence)
 
     # --- Figure ------------------------------------------------------------
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+    n_panels = 3 if use_imu else 2
+    fig, axes = plt.subplots(n_panels, 1, figsize=(12, 10 if use_imu else 7))
     fig.patch.set_facecolor(SURFACE)
 
     plot_time_domain(axes[0], df)
     plot_spectrum(axes[1], freqs, mags, peak_freqs, peak_mags, labels)
-    plot_accelerometer(axes[2], df)
+    if use_imu:
+        plot_accelerometer(axes[2], df)
 
     fig.tight_layout(pad=2.0)
     fig.savefig(png_path, dpi=150, facecolor=SURFACE)
