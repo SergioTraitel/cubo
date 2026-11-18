@@ -184,11 +184,32 @@ class MAX30102:
     MAX_SAMPLES_PER_READ = 5    # 30 bytes, inside SMBus's 32-byte block limit
 
     def __init__(self, bus=I2C_BUS, address=MAX30102_ADDR):
-        from smbus2 import SMBus
+        try:
+            from smbus2 import SMBus
+        except ImportError as exc:
+            # smbus2 needs Linux's fcntl/ioctl: it imports fine on the Pi but
+            # not on Windows/macOS, where there is no I2C bus anyway.
+            raise RuntimeError(
+                f"I2C is not available on this machine ({exc}). run_pipeline.py "
+                f"must run on the Raspberry Pi; on a PC, use "
+                f"analytics/metrics.py or simulation/test_fft.py with the "
+                f"simulated data instead.") from exc
 
         self.address = address
-        self.bus = SMBus(bus)
-        part = self._read(self.REG_PART_ID)
+        try:
+            self.bus = SMBus(bus)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot open I2C bus {bus} ({exc}). Enable I2C with "
+                f"'sudo raspi-config' -> Interface Options -> I2C.") from exc
+
+        try:
+            part = self._read(self.REG_PART_ID)
+        except OSError as exc:
+            self.bus.close()
+            raise RuntimeError(
+                f"No response from MAX30102 at 0x{address:02x} ({exc}). "
+                f"Check wiring; 'i2cdetect -y {bus}' should list 57.") from exc
         if part != MAX30102_PART_ID:
             self.bus.close()
             raise RuntimeError(f"MAX30102 not found at 0x{address:02x} "
@@ -377,7 +398,10 @@ def main():
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(LOG_DIR, f"session_{stamp}.csv")
 
-    rows = record(out_path, args.duration, args.gps_port, args.gps_baud)
+    try:
+        rows = record(out_path, args.duration, args.gps_port, args.gps_baud)
+    except RuntimeError as exc:
+        sys.exit(f"Heart-rate sensor unavailable: {exc}")
 
     if rows:
         from analytics.metrics import summarize
